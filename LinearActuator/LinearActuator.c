@@ -14,7 +14,7 @@
 #define DIRECTION_PIN 6
 
 //PWM Pin for setting speeds
-#define PWM_PIN 12
+#define PWM_PIN 18
 
 // Setup a struct for strings
 struct string {
@@ -53,27 +53,37 @@ size_t writefunc(void *ptr, size_t size, size_t nmemb, struct string *s)
 //  1: Extending
 //  0: Stopped
 // -1: Retracting
-int state = 0;
+int state = 1;
+
+int numExtended = 0;
+
+int pwmResetSpeed = 100;
+int pwmMaxSpeed = 100;
+
+int pwmSpeed = 0;
+int pwmRampSpeed = 10;
 
 //Initialize the pins with correct types
 void setup_gpio()
 {
   pinMode(DIRECTION_PIN, OUTPUT);
-  //pinMode(PWM_PIN, OUTPUT);
+  //pinMode(PWM_PIN, PWM_OUTPUT);
+  //pwmSetClock(10);
+  //pwmSetRange(100);
   softPwmCreate(PWM_PIN, 0, 100);
 }
 
 //A function that use the libcurl library to get the 
 //linear actuator state from the Node.js server.
 void getState(){
-	
+
 	CURL *curl;
 	CURLcode res;
 
 	curl_global_init(CURL_GLOBAL_DEFAULT);
 
 	curl = curl_easy_init();
-	
+
 	if(curl) {
 		struct string s;
 		init_string(&s);
@@ -81,10 +91,10 @@ void getState(){
 		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writefunc);
 		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &s);
 
-		/* Perform the request, res will get the return code */ 
+		/* Perform the request, res will get the return code */
 		res = curl_easy_perform(curl);
-				
-		/* Check for errors */ 
+
+		/* Check for errors */
 		if(res != CURLE_OK){
 			printf("Curl failed: %s.\n", curl_easy_strerror(res));
 		} else if(s.len == 0){
@@ -99,48 +109,72 @@ void getState(){
 			} else {
 				//Get the state as an integer
 				state = cJSON_GetObjectItem(json, "state")->valueint;
-			
+
 				//Delete the JSON object and free the string
 				cJSON_Delete(json);
 				printf("New State: %d\n", state);
 				free(s.ptr);
 			}
-		}	
-		/* always cleanup */ 
+		}
+		/* always cleanup */
 		curl_easy_cleanup(curl);
 	} else {
 		printf("Failed to set up curl.\n");
 	}
-	
+
 	//Cleanup the CURLs info globablly.
 	//One call to this paired with each globabl init.
 	curl_global_cleanup();
 }
 
 void stopActuator() {
-	printf("Stopping...\n");
+	pwmSpeed = pwmResetSpeed;
+	printf("Stopping: %d\n", pwmSpeed);
+//	pwmWrite(PWM_PIN, 0);
 	softPwmWrite(PWM_PIN, 0);
 }
 
 void retractActuator() {
-	stopActuator();
-	printf("Retracting...\n");
+        if(pwmSpeed < pwmMaxSpeed){
+	        pwmSpeed += pwmRampSpeed;
+	}
+	if(numExtended < 0){
+		numExtended--;
+	}
+	printf("Retracting: %d\n", pwmSpeed);
 	digitalWrite(DIRECTION_PIN, HIGH);
-	softPwmWrite(PWM_PIN, 100);
+//	pwmWrite(PWM_PIN, 1000);
+	softPwmWrite(PWM_PIN, pwmSpeed);
 }
 
 void extendActuator() {
-	stopActuator();
-	printf("Extending...\n");
+	if(pwmSpeed < pwmMaxSpeed){
+		pwmSpeed += pwmRampSpeed;
+	}
+	numExtended++;
+	printf("Extending: %d\n", pwmSpeed);
 	digitalWrite(DIRECTION_PIN, LOW);
-	softPwmWrite(PWM_PIN, 100);
+//	pwmWrite(PWM_PIN, 1000);
+	softPwmWrite(PWM_PIN, pwmSpeed);
 }
 
 void signalHandler(int signal){
 	printf("Handling signal: %d\n", signal);
 	printf("Retracting actuator...\n");
-	retractActuator();
+	stopActuator();
 	delay(1000);
+	int i;
+	int numRetractTimes = numExtended * 1.4; // Add some padding
+	printf("Number of final times to retract: %d", numRetractTimes);
+	for(i = 0; i < numRetractTimes; i++){
+		retractActuator();
+		usleep(500 * 1000);
+	}
+	delay(1000);
+	stopActuator();
+	delay(10);
+	stopActuator();
+	delay(300);
 	printf("Actuator Retracted. Ending program.\n");
 	exit(signal);
 }
@@ -154,16 +188,23 @@ int main(int argc, char **argv) {
 		exit(1);
 	//~ Set the pins to the correct output types.
 	setup_gpio();
-	
+
 	//Start the program by stopping the actuator
 	stopActuator();
-	
+
+	// Initially Retract for a bit
+	delay(500);
+	retractActuator();
+	delay(2000);
+
+	// Stop
+	stopActuator();
+	delay(500);
+
 	while(1) {
 		usleep(500 * 1000);
-		
 		//~ Run CURL GET command
 		getState();
-		
 		printf("Current state: %d\n", state);
 		if(state == 1) {
 			extendActuator();
@@ -173,7 +214,6 @@ int main(int argc, char **argv) {
 		}
 		else if (state == -1){
 			retractActuator();
-		}			
+		}
 	}
-	
 }
